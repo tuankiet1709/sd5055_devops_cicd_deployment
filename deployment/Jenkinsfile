@@ -1,0 +1,132 @@
+pipeline {
+    agent any
+    
+    parameters {
+        string(name: 'FRONTEND_IMAGE_TAG', defaultValue: 'latest', description: 'Frontend image tag to deploy')
+        string(name: 'BACKEND_IMAGE_TAG', defaultValue: 'latest', description: 'Backend image tag to deploy')
+    }
+    
+    environment {
+        AWS_ACCOUNT_ID = credentials('aws-account-id') // Retrieve from Jenkins credentials
+        EKS_CLUSTER = 'cicd-pipeline-cluster' // EKS cluster name
+        AWS_REGION = 'us-east-1' // AWS region
+        NAMESPACE = 'sd5055-msa' // Namespace name
+    }
+    
+    stages {
+        stage('Configure kubectl') {
+            steps {
+                echo "Configuring kubectl for EKS cluster: ${EKS_CLUSTER}"
+                withCredentials([
+                    string(credentialsId: 'aws-access-key-id', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'aws-secret-access-key', variable: 'AWS_SECRET_ACCESS_KEY')
+                ]) {
+                    sh """
+                        export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+                        export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+                        export AWS_DEFAULT_REGION=${AWS_REGION}
+                        
+                        aws eks update-kubeconfig \
+                            --region ${AWS_REGION} \
+                            --name ${EKS_CLUSTER}
+                        
+                        echo "kubectl configured"
+                        kubectl cluster-info
+                    """
+                }
+            }
+        }
+        
+        stage('Deploy to EKS') {
+            steps {
+                echo "Deploying with image tag: ${params.FRONTEND_IMAGE_TAG} and ${params.BACKEND_IMAGE_TAG}"
+                withCredentials([
+                    string(credentialsId: 'aws-access-key-id', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'aws-secret-access-key', variable: 'AWS_SECRET_ACCESS_KEY')
+                ]) {
+                    sh """
+                        export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+                        export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+                        export AWS_DEFAULT_REGION=${AWS_REGION}
+                        
+                        # Apply deployment using envsubst for environment variable substitution
+                        export AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID}
+                        export FRONTEND_IMAGE_TAG=${params.FRONTEND_IMAGE_TAG}
+                        export BACKEND_IMAGE_TAG=${params.BACKEND_IMAGE_TAG}
+                        
+                        envsubst < deployment/app.yaml | kubectl apply -f -
+                        
+                        echo "Resources applied"
+                    """
+                }
+            }
+        }
+
+                stage('Wait for Rollout') {
+            steps {
+                echo "Waiting for deployments to complete..."
+                withCredentials([
+                    string(credentialsId: 'aws-access-key-id', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'aws-secret-access-key', variable: 'AWS_SECRET_ACCESS_KEY')
+                ]) {
+                    sh """
+                        export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+                        export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+                        export AWS_DEFAULT_REGION=${AWS_REGION}
+                        
+                        kubectl rollout status deployment/backend -n ${NAMESPACE} --timeout=300s
+                        kubectl rollout status deployment/frontend -n ${NAMESPACE} --timeout=300s
+                        
+                        echo "Rollout complete"
+                    """
+                }
+            }
+        }
+        
+        stage('Verify') {
+            steps {
+                echo "Deployment complete! Getting status..."
+                withCredentials([
+                    string(credentialsId: 'aws-access-key-id', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'aws-secret-access-key', variable: 'AWS_SECRET_ACCESS_KEY')
+                ]) {
+                    sh """
+                        export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+                        export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+                        export AWS_DEFAULT_REGION=${AWS_REGION}
+                        
+                        echo "Pods:"
+                        kubectl get pods -n ${NAMESPACE}
+                        
+                        echo ""
+                        echo "Services:"
+                        kubectl get svc -n ${NAMESPACE}
+                        
+                        echo ""
+                        echo "Getting frontend URL..."
+                        sleep 10
+                        FRONTEND_URL=\$(kubectl get svc frontend -n ${NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+                        
+                        if [ -n "\$FRONTEND_URL" ]; then
+                            echo "======================================"
+                            echo "Frontend URL: http://\$FRONTEND_URL"
+                            echo "======================================"
+                        else
+                            echo "LoadBalancer URL not ready yet"
+                        fi
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo "Deployment successful!"
+            echo "Image Tag: ${params.IMAGE_TAG}"
+        }
+        failure {
+            echo "Deployment failed!"
+        }
+    }
+}
